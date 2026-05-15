@@ -299,7 +299,7 @@ html,body{height:100%;overflow:hidden;font-family:-apple-system,BlinkMacSystemFo
       <div class="ctitle">Tax Report</div>
       <div class="fg"><label>TAX YEAR</label><select class="sel" id="ryr" style="margin-bottom:0" onchange="renderRpt()"></select></div>
       <div class="row" style="margin-top:10px;margin-bottom:14px">
-        <button class="btn g sm" onclick="exportXLS()">&#128202; Export Excel</button>
+        <button class="btn g sm" onclick="exportXLS()">&#128202; Export Excel (.xlsx)</button>
         <button class="btn o sm" onclick="saveReportOD()">&#9729; Save to OneDrive</button>
       </div>
       <div id="rb"></div>
@@ -995,54 +995,298 @@ function renderRpt(){
   document.getElementById('rb').innerHTML=html;
 }
 
-// ── EXCEL EXPORT ─────────────────────────────
+// ── EXCEL EXPORT — real .xlsx (OOXML ZIP) ────
+// Pure JS, no libraries. Opens in Excel, Numbers, LibreOffice, Google Sheets.
+
 function exportXLS(){
   var yr=parseInt(document.getElementById('ryr').value);
   var txs=S.txs.filter(function(t){return t.yr===yr;});
   if(!txs.length){toast('No data for this year','er');return;}
-  var ct={};txs.forEach(function(t){if(!ct[t.cat])ct[t.cat]={i:0,e:0};if(t.type==='i')ct[t.cat].i+=t.amt;else ct[t.cat].e+=t.amt;});
-  var tI=0,tE=0;Object.keys(ct).forEach(function(k){tI+=ct[k].i;tE+=ct[k].e;});
-  var sumR=[['TaxTracker Pro — Tax Year '+yr],['Generated: '+new Date().toLocaleDateString()],[''],['INCOME SUMMARY'],['Category','Amount ($)']];
+
+  var ct={};
+  txs.forEach(function(t){if(!ct[t.cat])ct[t.cat]={i:0,e:0};if(t.type==='i')ct[t.cat].i+=t.amt;else ct[t.cat].e+=t.amt;});
+  var tI=0,tE=0;
+  Object.keys(ct).forEach(function(k){tI+=ct[k].i;tE+=ct[k].e;});
+
+  // Build sheets data
+  var sumR=[
+    ['TaxTracker Pro — Tax Year '+yr],
+    ['Generated: '+new Date().toLocaleDateString()],
+    [''],
+    ['INCOME SUMMARY'],['Category','Amount ($)']
+  ];
   IG.forEach(function(g){(GRP[g]||[]).forEach(function(c){if((ct[c]||{i:0}).i>0)sumR.push([c,(ct[c]||{i:0}).i]);});});
-  sumR.push(['TOTAL INCOME',tI],[' '],['EXPENSE / DEDUCTIONS'],['Category','Amount ($)']);
+  sumR.push(['TOTAL INCOME',tI],[''],['EXPENSE / DEDUCTIONS'],['Category','Amount ($)']);
   Object.keys(GRP).filter(function(g){return IG.indexOf(g)===-1;}).forEach(function(g){(GRP[g]||[]).forEach(function(c){if((ct[c]||{e:0}).e>0)sumR.push([c,(ct[c]||{e:0}).e]);});});
-  sumR.push(['TOTAL EXPENSES',tE],[' '],['NET TAXABLE',tI-tE]);
+  sumR.push(['TOTAL EXPENSES',tE],[''],['NET TAXABLE',tI-tE]);
+
   var txR=[['Date','Type','Category','Description','Amount ($)','Notes','Has Receipt']];
   txs.forEach(function(t){txR.push([t.date,t.type==='i'?'Income':'Expense',t.cat,t.desc,t.amt,t.notes||'',t.rcpt?'Yes':'No']);});
+
   var sheets=[{name:'Tax Summary',rows:sumR},{name:'All Transactions',rows:txR}];
   Object.keys(GRP).filter(function(g){return IG.indexOf(g)===-1;}).forEach(function(g){
-    var cats=GRP[g]||[];var rows=[['Date','Category','Description','Amount ($)','Notes']];var tot=0;
+    var cats=GRP[g]||[];
+    var rows=[['Date','Category','Description','Amount ($)','Notes']];
+    var tot=0;
     txs.filter(function(t){return cats.indexOf(t.cat)!==-1;}).forEach(function(t){rows.push([t.date,t.cat,t.desc,t.amt,t.notes||'']);tot+=t.amt;});
-    if(rows.length>1){rows.push([' ',' ','TOTAL',tot,' ']);sheets.push({name:g.substring(0,28),rows:rows});}
+    if(rows.length>1){rows.push(['','','TOTAL',tot,'']);sheets.push({name:g.substring(0,28),rows:rows});}
   });
-  dlBlob(mkXML(sheets),'application/vnd.ms-excel','TaxTracker_'+yr+'_Report.xls');
-  toast('Excel downloaded!','ok');
+
+  var blob=buildXLSX(sheets);
+  dlBlob(blob,'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','TaxTracker_'+yr+'_Report.xlsx');
+  toast('Excel (.xlsx) downloaded!','ok');
 }
-function mkXML(sheets){
-  var x='<?xml version="1.0"?><?mso-application progid="Excel.Sheet"?><Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">';
-  sheets.forEach(function(s){x+='<Worksheet ss:Name="'+xe(s.name)+'"><Table>';s.rows.forEach(function(row){x+='<Row>';row.forEach(function(cell){var n=typeof cell==='number';x+='<Cell><Data ss:Type="'+(n?'Number':'String')+'">'+(n?cell:xe(String(cell==null?'':cell)))+'</Data></Cell>';});x+='</Row>';});x+='</Table></Worksheet>';});
-  return x+'</Workbook>';
+
+// ── XLSX BUILDER ─────────────────────────────
+// Builds a real OOXML .xlsx ZIP from scratch using only browser APIs.
+function buildXLSX(sheets){
+  // Shared strings table
+  var strs=[],strMap={};
+  function addStr(s){
+    s=String(s==null?'':s);
+    if(strMap[s]===undefined){strMap[s]=strs.length;strs.push(s);}
+    return strMap[s];
+  }
+
+  // Pre-scan all string cells
+  sheets.forEach(function(sh){
+    sh.rows.forEach(function(row){
+      row.forEach(function(cell){
+        if(typeof cell!=='number')addStr(cell);
+      });
+    });
+  });
+
+  // Build sheet XML for each sheet
+  function colName(n){// 0=A,1=B,...
+    var s='';n++;
+    while(n>0){s=String.fromCharCode(64+(n%26||26))+s;n=Math.floor((n-(n%26||26))/26);}
+    return s;
+  }
+  function cellRef(r,c){return colName(c)+(r+1);}
+
+  function sheetXML(rows){
+    var xml='<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+      +'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+      +'<sheetData>';
+    rows.forEach(function(row,ri){
+      if(!row||!row.length)return;
+      xml+='<row r="'+(ri+1)+'">';
+      row.forEach(function(cell,ci){
+        var ref=cellRef(ri,ci);
+        if(typeof cell==='number'){
+          xml+='<c r="'+ref+'" t="n"><v>'+cell+'</v></c>';
+        } else {
+          var idx=strMap[String(cell==null?'':cell)];
+          xml+='<c r="'+ref+'" t="s"><v>'+idx+'</v></c>';
+        }
+      });
+      xml+='</row>';
+    });
+    xml+='</sheetData></worksheet>';
+    return xml;
+  }
+
+  // Shared strings XML
+  function ssXML(){
+    var x='<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+      +'<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="'+strs.length+'" uniqueCount="'+strs.length+'">';
+    strs.forEach(function(s){
+      x+='<si><t xml:space="preserve">'+escXml(s)+'</t></si>';
+    });
+    return x+'</sst>';
+  }
+
+  // Workbook XML
+  function wbXML(){
+    var x='<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+      +'<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+      +'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+      +'<sheets>';
+    sheets.forEach(function(sh,i){
+      x+='<sheet name="'+escXml(sh.name)+'" sheetId="'+(i+1)+'" r:id="rId'+(i+1)+'"/>';
+    });
+    return x+'</sheets></workbook>';
+  }
+
+  // Workbook rels
+  function wbRels(){
+    var x='<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+      +'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">';
+    sheets.forEach(function(sh,i){
+      x+='<Relationship Id="rId'+(i+1)+'" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet'+(i+1)+'.xml"/>';
+    });
+    x+='<Relationship Id="rId'+(sheets.length+1)+'" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/>';
+    return x+'</Relationships>';
+  }
+
+  // [Content_Types]
+  function contentTypes(){
+    var x='<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+      +'<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+      +'<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+      +'<Default Extension="xml" ContentType="application/xml"/>'
+      +'<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+      +'<Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>';
+    sheets.forEach(function(sh,i){
+      x+='<Override PartName="/xl/worksheets/sheet'+(i+1)+'.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>';
+    });
+    return x+'</Types>';
+  }
+
+  // Top-level rels
+  var topRels='<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    +'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+    +'<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+    +'</Relationships>';
+
+  // Build ZIP
+  var files={};
+  files['[Content_Types].xml']=contentTypes();
+  files['_rels/.rels']=topRels;
+  files['xl/workbook.xml']=wbXML();
+  files['xl/_rels/workbook.xml.rels']=wbRels();
+  files['xl/sharedStrings.xml']=ssXML();
+  sheets.forEach(function(sh,i){
+    files['xl/worksheets/sheet'+(i+1)+'.xml']=sheetXML(sh.rows);
+  });
+
+  return zipFiles(files);
 }
-function dlBlob(c,m,n){var b=new Blob([c],{type:m});var u=URL.createObjectURL(b);var a=document.createElement('a');a.href=u;a.download=n;a.click();setTimeout(function(){URL.revokeObjectURL(u);},2000);}
+
+function escXml(s){
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&apos;');
+}
+
+// ── MINI ZIP WRITER ──────────────────────────
+// Creates a valid ZIP binary using DEFLATE-store (no compression needed for xlsx).
+function zipFiles(files){
+  var entries=[];
+  var central=[];
+  var offset=0;
+
+  Object.keys(files).forEach(function(name){
+    var data=strToBytes(files[name]);
+    var nameBytes=strToBytes(name);
+    var crc=crc32(data);
+    var dosDate=dosDateTime(new Date());
+
+    // Local file header
+    var lh=new Uint8Array(30+nameBytes.length+data.length);
+    var dv=new DataView(lh.buffer);
+    dv.setUint32(0,0x04034b50,true); // sig
+    dv.setUint16(4,20,true);         // version needed
+    dv.setUint16(6,0,true);          // flags
+    dv.setUint16(8,0,true);          // compression (stored)
+    dv.setUint32(10,dosDate,true);   // mod time+date
+    dv.setUint32(14,crc,true);       // crc32
+    dv.setUint32(18,data.length,true); // compressed size
+    dv.setUint32(22,data.length,true); // uncompressed size
+    dv.setUint16(26,nameBytes.length,true);
+    dv.setUint16(28,0,true);         // extra len
+    lh.set(nameBytes,30);
+    lh.set(data,30+nameBytes.length);
+
+    entries.push(lh);
+
+    // Central directory entry
+    var ce=new Uint8Array(46+nameBytes.length);
+    var cdv=new DataView(ce.buffer);
+    cdv.setUint32(0,0x02014b50,true);
+    cdv.setUint16(4,20,true);
+    cdv.setUint16(6,20,true);
+    cdv.setUint16(8,0,true);
+    cdv.setUint16(10,0,true);
+    cdv.setUint32(12,dosDate,true);
+    cdv.setUint32(16,crc,true);
+    cdv.setUint32(20,data.length,true);
+    cdv.setUint32(24,data.length,true);
+    cdv.setUint16(28,nameBytes.length,true);
+    cdv.setUint16(30,0,true);
+    cdv.setUint16(32,0,true);
+    cdv.setUint16(34,0,true);
+    cdv.setUint16(36,0,true);
+    cdv.setUint32(38,0,true);
+    cdv.setUint32(42,offset,true);
+    ce.set(nameBytes,46);
+    central.push(ce);
+
+    offset+=lh.length;
+  });
+
+  var cdOffset=offset;
+  var cdSize=central.reduce(function(s,c){return s+c.length;},0);
+  var eocd=new Uint8Array(22);
+  var edv=new DataView(eocd.buffer);
+  edv.setUint32(0,0x06054b50,true);
+  edv.setUint16(4,0,true);
+  edv.setUint16(6,0,true);
+  edv.setUint16(8,entries.length,true);
+  edv.setUint16(10,entries.length,true);
+  edv.setUint32(12,cdSize,true);
+  edv.setUint32(16,cdOffset,true);
+  edv.setUint16(20,0,true);
+
+  var all=[].concat(entries,central,[eocd]);
+  var total=all.reduce(function(s,a){return s+a.length;},0);
+  var out=new Uint8Array(total);
+  var pos=0;
+  all.forEach(function(a){out.set(a,pos);pos+=a.length;});
+  return new Blob([out],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+}
+
+function strToBytes(s){
+  var enc=new TextEncoder();
+  return enc.encode(s);
+}
+
+function dosDateTime(d){
+  var time=((d.getHours()&0x1f)<<11)|((d.getMinutes()&0x3f)<<5)|((d.getSeconds()>>1)&0x1f);
+  var date=(((d.getFullYear()-1980)&0x7f)<<9)|(((d.getMonth()+1)&0x0f)<<5)|(d.getDate()&0x1f);
+  return ((date&0xffff)<<16)|(time&0xffff);
+}
+
+function crc32(buf){
+  var table=crc32.t;
+  if(!table){
+    table=new Uint32Array(256);
+    for(var i=0;i<256;i++){var c=i;for(var j=0;j<8;j++)c=c&1?(0xEDB88320^(c>>>1)):c>>>1;table[i]=c;}
+    crc32.t=table;
+  }
+  var c=0xFFFFFFFF;
+  for(var i=0;i<buf.length;i++)c=table[(c^buf[i])&0xff]^(c>>>8);
+  return (c^0xFFFFFFFF)>>>0;
+}
+
+function dlBlob(blob,mime,name){
+  var b=blob instanceof Blob?blob:new Blob([blob],{type:mime});
+  var u=URL.createObjectURL(b);
+  var a=document.createElement('a');a.href=u;a.download=name;a.click();
+  setTimeout(function(){URL.revokeObjectURL(u);},3000);
+}
 
 async function saveReportOD(){
   var yr=parseInt(document.getElementById('ryr').value);
+  var txs=S.txs.filter(function(t){return t.yr===yr;});
+  if(!txs.length){toast('No data for this year','er');return;}
   if(fH){
     try{
       var p=await fH.queryPermission({mode:'readwrite'});
       if(p!=='granted')await fH.requestPermission({mode:'readwrite'});
-      var txs=S.txs.filter(function(t){return t.yr===yr;});
       var ct={};txs.forEach(function(t){if(!ct[t.cat])ct[t.cat]={i:0,e:0};if(t.type==='i')ct[t.cat].i+=t.amt;else ct[t.cat].e+=t.amt;});
       var tI=0,tE=0;Object.keys(ct).forEach(function(k){tI+=ct[k].i;tE+=ct[k].e;});
       var rows=[['Date','Type','Category','Description','Amount ($)','Notes']];
       txs.forEach(function(t){rows.push([t.date,t.type==='i'?'Income':'Expense',t.cat,t.desc,t.amt,t.notes||'']);});
-      var wb=mkXML([{name:'Summary',rows:[['TaxTracker Pro Tax Year '+yr],['Income',tI],['Expenses',tE],['Net Taxable',tI-tE]]},{name:'Transactions',rows:rows}]);
-      var fhandle=await fH.getFileHandle('TaxTracker_'+yr+'_Report.xls',{create:true});
-      var w=await fhandle.createWritable();await w.write(new Blob([wb]));await w.close();
+      var blob=buildXLSX([
+        {name:'Summary',rows:[['TaxTracker Pro Tax Year '+yr],['Income',tI],['Expenses',tE],['Net Taxable',tI-tE]]},
+        {name:'Transactions',rows:rows}
+      ]);
+      var fhandle=await fH.getFileHandle('TaxTracker_'+yr+'_Report.xlsx',{create:true});
+      var w=await fhandle.createWritable();await w.write(blob);await w.close();
       toast('Report saved to OneDrive!','ok');return;
-    }catch(e){}
+    }catch(e){console.error(e);}
   }
-  exportXLS();toast('Downloaded! Move it to your OneDrive.','ok');
+  exportXLS();
 }
 
 // ── ONEDRIVE ─────────────────────────────────
