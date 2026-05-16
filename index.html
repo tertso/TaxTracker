@@ -236,8 +236,8 @@ html,body{height:100%;overflow:hidden;font-family:-apple-system,BlinkMacSystemFo
       </div>
       <div class="fg"><label>NOTES (OPTIONAL)</label><textarea id="fn" placeholder="Extra details..."></textarea></div>
       <!-- RECURRING TOGGLE -->
-      <label class="rec-toggle" onclick="toggleRec()">
-        <input type="checkbox" id="f-rec" onclick="event.stopPropagation();toggleRec()">
+      <label class="rec-toggle" for="f-rec">
+        <input type="checkbox" id="f-rec" onchange="toggleRec(this.checked)">
         <div style="flex:1">
           <div class="rec-toggle-lbl">&#128260; Make this recurring</div>
           <div class="rec-toggle-sub">Automatically repeat on a schedule</div>
@@ -525,11 +525,8 @@ function doInstall(){
 function dismissBanner(){document.getElementById('ibanner').classList.remove('on');}
 
 // ── FORM ─────────────────────────────────────
-function toggleRec(){
-  var cb=document.getElementById('f-rec');
-  var opts=document.getElementById('rec-opts');
-  // if called from label click, checkbox already toggled
-  opts.classList.toggle('on',cb.checked);
+function toggleRec(checked){
+  document.getElementById('rec-opts').classList.toggle('on', checked);
 }
 function setTT(t){
   cType=t;
@@ -614,7 +611,7 @@ function resetForm(){
   document.getElementById('fdsc').value='';
   document.getElementById('fn').value='';
   document.getElementById('f-rec').checked=false;
-  document.getElementById('rec-opts').classList.remove('on');
+  toggleRec(false);
   document.getElementById('f-recend').value='';
   clrRcpt();setTdy();
 }
@@ -894,10 +891,16 @@ function vRcpt(id){
     +'<img src="'+t.rcpt+'" style="width:100%;border-radius:10px;display:block">'
     +'<div class="row" style="margin-top:12px">'
     +'<button class="btn o sm" onclick="dlRcpt(\''+t.id+'\')">&#128229; Download</button>'
-    +(fH?'<button class="btn o sm" onclick="syncRcpt(S.txs.find(function(x){return x.id===\''+t.id+'\';}));clsOv()">&#9651; Sync</button>':'')
+    +(fH?'<button class="btn o sm" onclick="syncRcptById(\''+t.id+'\')">&#9651; Sync</button>':'')
     +'<button class="btn o sm" onclick="clsOv()">Close</button>'
     +'</div>'
   );
+}
+
+function syncRcptById(id){
+  var t=S.txs.find(function(x){return x.id===id;});
+  if(t)syncRcpt(t);
+  clsOv();
 }
 function dlRcpt(id){
   var t=S.txs.find(function(x){return x.id===id;});if(!t||!t.rcpt)return;
